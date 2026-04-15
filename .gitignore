@@ -30,6 +30,7 @@ Thumbs.db
 postgres_data/
 evolution_instances/
 evolution_store/
+memory_db/
 
 # App logs and temp files
 *.log
