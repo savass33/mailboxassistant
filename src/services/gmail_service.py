@@ -57,6 +57,19 @@ class GmailService:
         except Exception as e:
             print(f"{Fore.RED}❌ Erro ao marcar emails como lidos: {e}{Fore.RESET}")
 
+    def trash_emails(self, message_ids: List[str]):
+        """Move os emails especificados para a Lixeira de forma segura."""
+        try:
+            for msg_id in message_ids:
+                with self._lock:
+                    self._service.users().messages().trash(
+                        userId='me', 
+                        id=msg_id
+                    ).execute()
+            print(f"{Fore.RED}[*] Gmail: {len(message_ids)} e-mails movidos para a Lixeira.{Fore.RESET}")
+        except Exception as e:
+            print(f"{Fore.RED}❌ Erro ao enviar e-mails para a Lixeira: {e}{Fore.RESET}")
+
     def get_email_details(self, message_id: str) -> Optional[Dict]:
         """Busca detalhes e desmembra o conteúdo de um email específico."""
         try:

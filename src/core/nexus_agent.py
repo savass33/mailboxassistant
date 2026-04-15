@@ -5,6 +5,7 @@ from src.services.gmail_service import GmailService
 from src.services.llm_service import LLMService
 from src.services.telegram_service import TelegramService
 from src.services.memory_service import MemoryService
+from src.services.calendar_service import CalendarService
 
 class NexusAgent:
     def __init__(self):
@@ -12,6 +13,7 @@ class NexusAgent:
         self.llm = LLMService()
         self.telegram = TelegramService()
         self.memory = MemoryService()
+        self.calendar = CalendarService()
 
     def _broadcast(self, text: str, chat_id: int = None):
         """Dispara a saída tanto para o terminal quanto para o Telegram, se houver chat_id."""
@@ -26,29 +28,30 @@ class NexusAgent:
         """O Cérebro Roteador (Intent Parser) - Interpreta linguagem natural do Telegram."""
         self._broadcast("⏳ *Interpretando Comando Tático...*", chat_id)
         
-        router_prompt = f"""Analise a intenção do usuário: "{user_text}"
+        router_prompt = f"""Você é um parser JSON. Sua única tarefa é analisar a entrada e cuspir UM JSON válido.
+Você DEVE escolher UMA destas 'actions' permitidas:
+"triage" = Resumir a caixa de entrada, ver não lidos de forma geral ou marcar lidos.
+"deepdive" = Ler um e-mail de um remetente ESPECÍFICO (ex: "do chefe", "da gupy").
+"news" = Ler apenas newsletters ou notícias.
+"reply" = Responder a um e-mail.
+"schedule" = Agendar um e-mail.
+"delete" = Apagar ou excluir um e-mail específico (ex: "apaga o e-mail do banco").
+"sync_memory" = Salvar e-mails na memória vetorial.
+"ask_memory" = Responder perguntas sobre histórico antigo.
+"chat" = Conversa genérica.
 
-Retorne APENAS um JSON plano (sem markdown) escolhendo UMA destas actions:
-- "triage": ler, resumir ou ver a caixa de entrada de forma GERAL (vários e-mails).
-- "deepdive": focar, ler ou resumir um e-mail ESPECÍFICO (ex: "o email do filipe", "do meu chefe").
-- "news": ler ou focar apenas em newsletters/notícias gerais.
-- "reply": responder a um e-mail.
-- "sync_memory": sincronizar ou baixar e-mails para a memória.
-- "ask_memory": perguntas sobre o passado ("quando comprei", "qual o valor de").
-- "chat": conversa genérica fora do escopo de e-mails.
+Regras CRÍTICAS:
+- "mark_read" deve ser FALSE por padrão. Mude para TRUE APENAS SE o usuário disser explicitamente as palavras "limpar", "marcar como lido" ou "apagar notificação".
+- Se o usuário pedir para apagar/excluir o e-mail, a action é SEMPRE "delete".
+- Se a action for "deepdive" ou "delete", defina a "query" com o nome do remetente. Senão, "query" é "".
+- NUNCA invente actions.
 
-Campos adicionais do JSON:
-- query: Busca Gmail se deepdive/reply (ex: "from:filipe"). Se "ask_memory", coloque a pergunta aqui.
-- instruction: Instrução de resposta APENAS se for "reply".
-- mark_read: true se pedir para marcar como lido, limpar ou apagar.
-
-EXEMPLO DE RESPOSTA (Não copie o conteúdo, apenas siga a estrutura das chaves):
-{{"action": "deepdive", "query": "from:filipe", "instruction": "", "mark_read": false}}
+Entrada do usuário: "{user_text}"
 """
         
         try:
             print(f"{Fore.YELLOW}[*] Nexus Engine: Roteando intenção via LLM...{Style.RESET_ALL}")
-            intent_response = self.llm.analyze("Responda APENAS JSON puro.", router_prompt)
+            intent_response = self.llm.analyze("Responda APENAS com um objeto JSON válido, sem crases ou formatação markdown.", router_prompt)
             print(f"DEBUG LLM Router: {intent_response}")
             
             match = re.search(r'\{.*?\}', intent_response, re.DOTALL)
@@ -56,10 +59,19 @@ EXEMPLO DE RESPOSTA (Não copie o conteúdo, apenas siga a estrutura das chaves)
             intent = json.loads(match.group(0).strip())
             
             action = intent.get("action", "chat")
+            
+            # Força o fallback se a IA inventar uma action inválida
+            allowed_actions = ["triage", "deepdive", "news", "reply", "schedule", "delete", "sync_memory", "ask_memory", "chat"]
+            if action not in allowed_actions:
+                action = "triage" if intent.get("mark_read") else "chat"
+                
             query = intent.get("query", "")
             instruction = intent.get("instruction", "")
-            if action not in ["deepdive", "reply", "ask_memory"]: query = ""
-            mark_read = intent.get("mark_read", False)
+            if action not in ["deepdive", "reply", "delete", "ask_memory", "schedule"]: query = ""
+            
+            # Trata o mark_read para garantir que seja Booleano
+            mark_read_val = intent.get("mark_read", False)
+            mark_read = str(mark_read_val).lower() == "true"
             
             print(f"{Fore.GREEN}[+] Intenção: {action} | Query: {query} | Instruction: {instruction} | MarkRead: {mark_read}{Style.RESET_ALL}")
 
@@ -71,6 +83,10 @@ EXEMPLO DE RESPOSTA (Não copie o conteúdo, apenas siga a estrutura das chaves)
                 self.deep_dive(query, chat_id, mark_read)
             elif action == "reply":
                 self.reply_to_email(query, instruction, chat_id, mark_read)
+            elif action == "schedule":
+                self.schedule_event(query, chat_id, mark_read)
+            elif action == "delete":
+                self.prepare_deletion(query, chat_id)
             elif action == "sync_memory":
                 self.sync_memory(chat_id)
             elif action == "ask_memory":
@@ -92,32 +108,30 @@ EXEMPLO DE RESPOSTA (Não copie o conteúdo, apenas siga a estrutura das chaves)
 
         email_text = "\n".join([f"ID: {e['id']} | De: {e['from']} | Assunto: {e['subject']} | Resumo: {e['snippet']}" for e in emails])
         
-        system_prompt = """Você é um classificador de e-mails robótico.
-A sua saída deve ser APENAS LINHAS DE TEXTO. NÃO pule linhas extras. NÃO use negrito. NÃO faça observações. NÃO cumprimente.
+        system_prompt = """Você é um classificador de dados estrito.
+Sua tarefa é ler os e-mails fornecidos e aplicar uma Tag e uma Categoria para cada um.
+É ESTUDANTEMENTE PROIBIDO criar, inventar ou deduzir e-mails que não estão na lista abaixo. Responda APENAS sobre os e-mails listados na seção 'EMAILS A PROCESSAR'.
 
-Categorias e Tags:
-🔴 | CRÍTICO | Alertas de Segurança, Chefia, Vagas/Gupy, Prazos.
-🔵 | FINANCEIRO | Bancos (Inter), Gastos (Pierre), Pix.
-🟢 | NOTÍCIAS | Newsletters (Filipe Deschamps), Artigos.
-⚪ | NOISE | Outros, Spam, Promoções.
+Regras de Classificação:
+🔴 CRÍTICO: Segurança, Chefia, Vagas de emprego, Estágios, Portfólios, Entrevistas, Prazos.
+🔵 FINANCEIRO: Bancos, Gastos, Pix, Compras.
+🟢 NOTÍCIAS: Newsletters, Artigos, Atualizações de software.
+⚪ NOISE: Promoções, Spam.
 
-Formato OBRIGATÓRIO (Uma linha por e-mail, separada por pipe '|'):
-TAG | CATEGORIA | Resumo curto do email
+FORMATO OBRIGATÓRIO (Exatamente uma linha por e-mail da lista):
+TAG | CATEGORIA | Nome Real do Remetente - Assunto Original do Email.
 
-Exemplo correto:
-🔴 | CRÍTICO | Alerta de segurança do Google na conta Savas.
-⚪ | NOISE | Gasto de R$30 no cartão final 1234.
-
-Use dados REAIS fornecidos abaixo."""
+Não use negrito, não escreva introduções e NÃO INVENTE remetentes (ex: Nubank, Inter, Gupy) se eles não estiverem no texto original abaixo."""
 
         try:
-            response = self.llm.analyze("Classifique usando as categorias e o formato exato exigido.", system_prompt + "\n\nEMAILS REAIS:\n" + email_text)
+            response = self.llm.analyze("Responda estritamente com as linhas no formato 'TAG | CATEGORIA | Texto'. Para cada email fornecido, crie uma linha.", system_prompt + "\n\nEMAILS REAIS A PROCESSAR:\n" + email_text)
             print(f"DEBUG LLM Triage:\n{response}")
             
             lines = [l.strip() for l in response.strip().split('\n') if '|' in l and len(l.split('|')) >= 3]
             
             if not lines:
-                raise ValueError("Ollama não gerou linhas válidas com o caractere '|'.")
+                # Fallback seguro caso a IA não use o pipe (|)
+                lines = [f"⚪ | NOISE | {e['from']} - {e['subject']}" for e in emails]
 
             self._broadcast("<b>📋 RELATÓRIO DE TRIAGEM ATUALIZADO</b>", chat_id)
             
@@ -303,3 +317,82 @@ Se a resposta não estiver no contexto, diga claramente que não encontrou infor
 
         response = self.llm.analyze(system_prompt, question)
         self._broadcast(f"**🧠 NEXUS RECALL:**\n\n{response}", chat_id)
+
+    def schedule_event(self, search_query: str, chat_id: int = None, mark_read: bool = False):
+        """Lê um e-mail, extrai dados de agendamento e cria no Google Calendar."""
+        print(f"{Fore.YELLOW}[*] Nexus Engine: Schedule Protocol iniciado para query [{search_query}]...{Style.RESET_ALL}")
+        self._broadcast(f"📅 *Analisando e-mail para agendamento:* `{search_query}`...", chat_id)
+        
+        final_query = search_query if "is:unread" in search_query else f"is:unread {search_query}"
+        emails = self.gmail.fetch_emails(query=final_query, limit=1)
+        
+        if not emails:
+            self._broadcast(f"⚠️ Não encontrei o e-mail para agendar com a busca `{search_query}`.", chat_id)
+            return
+            
+        email = emails[0]
+        content = f"De: {email['from']}\nAssunto: {email['subject']}\nCorpo:\n{email['body'][:2000]}" 
+
+        import datetime
+        now = datetime.datetime.now().isoformat()
+        
+        system_prompt = f"""Você é o 'Nexus', assistente executivo.
+Extraia os dados de agendamento (reunião, entrevista, prazo) do e-mail fornecido.
+A data/hora atual é: {now}.
+
+Retorne APENAS um JSON com os campos:
+- title: Título curto do evento.
+- description: Resumo do que é.
+- start_iso: Data e hora de início no formato ISO 8601 (ex: "2026-04-20T14:00:00-03:00"). ESTIME com base no texto e na data atual.
+
+EXEMPLO DE RESPOSTA:
+{{"title": "Entrevista Gupy", "description": "Entrevista técnica com o RH", "start_iso": "2026-04-20T14:00:00-03:00"}}"""
+
+        try:
+            response = self.llm.analyze("Responda APENAS JSON puro.", system_prompt + "\n\nEMAIL:\n" + content)
+            
+            match = re.search(r'\{.*?\}', response, re.DOTALL)
+            if not match: raise ValueError("JSON não encontrado na resposta.")
+            event_data = json.loads(match.group(0).strip())
+            
+            link = self.calendar.create_event(
+                summary=event_data.get('title', 'Evento Nexus'),
+                description=event_data.get('description', 'Criado automaticamente pelo Nexus Agent'),
+                start_time_iso=event_data.get('start_iso')
+            )
+            
+            if link:
+                self._broadcast(f"✅ **EVENTO AGENDADO COM SUCESSO!**\n\n**Título:** {event_data.get('title')}\n**Data:** {event_data.get('start_iso')}\n\n🔗 [Link para o Calendar]({link})", chat_id)
+            else:
+                self._broadcast("❌ Falha ao criar o evento no Google Calendar.", chat_id)
+                
+            if mark_read:
+                self.gmail.mark_as_read([email['id']])
+                
+        except Exception as e:
+            self._broadcast(f"❌ Erro ao extrair dados de agendamento: {e}", chat_id)
+
+    def prepare_deletion(self, search_query: str, chat_id: int):
+        """Prepara um e-mail para exclusão, exigindo confirmação do usuário."""
+        print(f"{Fore.RED}[*] Nexus Engine: Deletion Protocol iniciado para query [{search_query}]...{Style.RESET_ALL}")
+        self._broadcast(f"⚠️ *Buscando e-mail para exclusão:* `{search_query}`...", chat_id)
+        
+        emails = self.gmail.fetch_emails(query=search_query, limit=1)
+        
+        if not emails:
+            self._broadcast(f"⚠️ Não encontrei nenhum e-mail correspondente a `{search_query}` para apagar.", chat_id)
+            return
+            
+        email = emails[0]
+        
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🚨 CONFIRMAR EXCLUSÃO", "callback_data": f"delete_{email['id']}"},
+                    {"text": "❌ CANCELAR", "callback_data": "cancel_delete"}
+                ]
+            ]
+        }
+        
+        warning_msg = f"🛑 **ATENÇÃO: CONFIRMAÇÃO DE EXCLUSÃO** 🛑\n\nVocê solicitou apagar o seguinte e-mail:\n\n**De:** {email['from']}\n**Assunto:** {email['subject']}\n\nTem certeza absoluta? Esta ação moverá o e-mail para a Lixeira."
+        self.telegram.send_message(chat_id, warning_msg, reply_markup=reply_markup)
