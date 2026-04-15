@@ -4,14 +4,12 @@ from colorama import Fore, Style
 from src.services.gmail_service import GmailService
 from src.services.llm_service import LLMService
 from src.services.telegram_service import TelegramService
-from src.services.db_service import DBService
 
 class NexusAgent:
     def __init__(self):
         self.gmail = GmailService()
         self.llm = LLMService()
         self.telegram = TelegramService()
-        self.db = DBService()
 
     def _broadcast(self, text: str, chat_id: int = None):
         """Dispara a saída tanto para o terminal quanto para o Telegram, se houver chat_id."""
