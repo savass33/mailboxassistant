@@ -69,6 +69,8 @@ class GmailService:
             
             return {
                 'id': message_id,
+                'threadId': detail.get('threadId', ''),
+                'message_id_header': self._get_header(payload, 'Message-ID'),
                 'snippet': snippet,
                 'from': self._get_header(payload, 'From'),
                 'subject': self._get_header(payload, 'Subject'),
@@ -76,6 +78,46 @@ class GmailService:
             }
         except Exception as e:
             print(f"{Fore.RED}❌ Erro ao decodificar dados do email {message_id}: {e}{Fore.RESET}")
+            return None
+
+    def create_draft(self, original_email: Dict, reply_text: str) -> Optional[str]:
+        """Cria um rascunho de resposta no Gmail mantendo a Thread original."""
+        from email.message import EmailMessage
+        import base64
+        
+        try:
+            message = EmailMessage()
+            message.set_content(reply_text)
+            
+            # Extrai apenas o email limpo de "Nome <email@dominio.com>"
+            import re
+            to_email = original_email['from']
+            email_match = re.search(r'<([^>]+)>', to_email)
+            if email_match:
+                to_email = email_match.group(1)
+                
+            message['To'] = to_email
+            
+            subject = original_email['subject']
+            if not subject.lower().startswith('re:'):
+                subject = 'Re: ' + subject
+            message['Subject'] = subject
+            
+            if original_email.get('message_id_header') and original_email['message_id_header'] != "Desconhecido":
+                message['In-Reply-To'] = original_email['message_id_header']
+                message['References'] = original_email['message_id_header']
+            
+            encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            create_message = {'message': {'raw': encoded_message}}
+            
+            if original_email.get('threadId'):
+                create_message['message']['threadId'] = original_email['threadId']
+                
+            with self._lock:
+                draft = self._service.users().drafts().create(userId='me', body=create_message).execute()
+            return draft['id']
+        except Exception as e:
+            print(f"{Fore.RED}❌ Erro ao criar rascunho no Gmail: {e}{Fore.RESET}")
             return None
 
     def _get_header(self, payload: Dict, name: str) -> str:
