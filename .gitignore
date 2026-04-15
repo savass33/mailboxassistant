@@ -1,0 +1,41 @@
+# Python virtual environment
+venv/
+.venv/
+env/
+bin/
+lib/
+include/
+
+# Secrets and Credentials
+.env
+cred.json
+token.json
+credentials.json
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker volumes and data
+postgres_data/
+evolution_instances/
+evolution_store/
+
+# App logs and temp files
+*.log
+qr.png
+qr2.png
+base64.txt
+raw_qr.txt
+qrcode.jpg
+response.json
