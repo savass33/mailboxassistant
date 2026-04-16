@@ -14,6 +14,7 @@ class NexusAgent:
         self.telegram = TelegramService()
         self.memory = MemoryService()
         self.calendar = CalendarService()
+        self.context_cache = {} # Armazena o último e-mail discutido por chat_id
 
     def _broadcast(self, text: str, chat_id: int = None):
         """Dispara a saída tanto para o terminal quanto para o Telegram, se houver chat_id."""
@@ -27,24 +28,34 @@ class NexusAgent:
     def process_telegram_command(self, chat_id: int, user_text: str):
         """O Cérebro Roteador (Intent Parser) - Interpreta linguagem natural do Telegram."""
         self._broadcast("⏳ *Interpretando Comando Tático...*", chat_id)
-        
-        router_prompt = f"""Você é um parser JSON. Sua única tarefa é analisar a entrada e cuspir UM JSON válido.
-Você DEVE escolher UMA destas 'actions' permitidas:
-"triage" = Resumir a caixa de entrada, ver não lidos de forma geral ou marcar lidos.
-"deepdive" = Ler um e-mail de um remetente ESPECÍFICO ou perguntar sobre um assunto específico (ex: "do chefe", "sobre o portfólio", "do que se trata essa etapa").
-"news" = Ler apenas newsletters ou notícias.
-"reply" = Responder a um e-mail.
-"schedule" = Agendar um e-mail.
-"delete" = Apagar ou excluir um e-mail específico.
-"sync_memory" = Salvar e-mails na memória vetorial.
-"ask_memory" = Responder perguntas sobre histórico antigo.
-"chat" = Conversa genérica, tirar dúvidas, ou falar com o assistente.
 
-Regras CRÍTICAS:
-- Se o usuário perguntar "do que se trata X" ou "me dê mais detalhes sobre Y", a action é SEMPRE "deepdive".
-- "mark_read" deve ser FALSE por padrão. Mude para TRUE APENAS SE o usuário disser explicitamente as palavras "limpar", "marcar como lido" ou "apagar notificação".
-- Se a action for "deepdive", "delete" ou "reply", defina a "query" usando operadores GMAIL se possível (ex: "from:filipe", "subject:portfólio", "from:gupy"). Se não houver remetente claro, use termos chave.
-- NUNCA invente actions.
+        # Recupera contexto anterior para ajudar na decisão
+        last_email = self.context_cache.get(chat_id, {})
+        context_str = f"Último e-mail discutido: De: {last_email.get('from', 'Nenhum')} | Assunto: {last_email.get('subject', 'Nenhum')}" if last_email else "Sem contexto anterior."
+
+        router_prompt = f"""Você é o Nexus, uma IA de elite para gestão de e-mails.
+Sua tarefa é analisar o pedido do usuário e planejar a execução.
+
+AÇÕES PERMITIDAS:
+- triage: Resumo geral da caixa de entrada.
+- deepdive: Análise profunda de um e-mail específico (necessita 'query').
+- news: Processar newsletters e notícias.
+- reply: Criar rascunho de resposta (necessita 'query' e 'instruction').
+- schedule: Extrair evento e colocar no calendário (necessita 'query').
+- delete: Mover para lixeira (necessita 'query').
+- chat: Conversa livre ou dúvidas técnicas.
+
+Contexto da conversa:
+{context_str}
+
+Responda APENAS com um JSON contendo:
+{{
+  "thought": "Seu raciocínio rápido sobre o que o usuário quer",
+  "action": "A ação principal",
+  "query": "Termo de busca Gmail (use operadores like from: ou subject:)",
+  "instruction": "Instruções extras para reply ou schedule",
+  "mark_read": true/false
+}}
 
 Entrada do usuário: "{user_text}"
 """
@@ -59,8 +70,10 @@ Entrada do usuário: "{user_text}"
             intent = json.loads(match.group(0).strip())
             
             action = intent.get("action", "chat")
-            
-            # Força o fallback se a IA inventar uma action inválida
+            thought = intent.get("thought", "Processando...")
+
+            # Exibe o raciocínio no terminal para debug
+            print(f"{Fore.CYAN}[💭 RACIOCÍNIO]: {thought}{Style.RESET_ALL}")
             allowed_actions = ["triage", "deepdive", "news", "reply", "schedule", "delete", "sync_memory", "ask_memory", "chat"]
             if action not in allowed_actions:
                 action = "triage" if intent.get("mark_read") else "chat"
@@ -122,14 +135,13 @@ Você NÃO PODE cometer erros. Você DEVE seguir a lógica exata abaixo:
 ⚪ | NOISE | E-mails sobre: Pesquisa de satisfação (Bluefit, opiniões), Promoções (Steam, jogos), Spam, Lembretes genéricos.
 
 FORMATO OBRIGATÓRIO POR EMAIL (EXATAMENTE UMA LINHA COM PIPES):
-TAG | CATEGORIA | Nome do Remetente - Assunto. (Resumo em 1 frase).
+TAG | CATEGORIA | Nome do Remetente - Assunto. (Resumo em 1 frase). [EXTRA: Info útil como links, valores ou prazos se houver].
 
-EXEMPLOS DE CLASSIFICAÇÃO PERFEITA (Siga este padrão para os emails reais):
-🔴 | CRÍTICO | Gupy - Você tem documentos pendentes para concluir a sua admissão. (Processo seletivo exige envio de documentos).
-🔴 | CRÍTICO | Aline - Etapa Portfólio Pessoal. (Confirmação de envio de portfólio para estágio).
-⚪ | NOISE | Bluefit - Queremos saber a sua opiniao! (Pesquisa de satisfação de academia).
-⚪ | NOISE | Steam - Squad from your Steam wishlist is now on sale! (Promoção de jogo).
-🟢 | NOTÍCIAS | Filipe Deschamps - Lei contra impressoras 3D. (Resumo de notícias diárias).
+EXEMPLOS DE CLASSIFICAÇÃO PERFEITA:
+🔴 | CRÍTICO | Gupy - Admissão. (Envio de documentos pendentes). [EXTRA: Prazo 20/04]
+🔵 | FINANCEIRO | Nubank - Fatura fechada. (Sua fatura de Abril está pronta). [EXTRA: R$ 450,00]
+🟢 | NOTÍCIAS | Filipe Deschamps - Newsletter. (IA e tecnologia). [EXTRA: Link: youtube.com/watch?v=...]
+⚪ | NOISE | Steam - Promoção. (Jogos em oferta).
 
 Você será penalizado se classificar um e-mail de admissão (Gupy) como NOISE ou uma pesquisa de opinião (Bluefit) como CRÍTICO. Preste atenção aos remetentes e assuntos!"""
 
@@ -207,6 +219,13 @@ A busca retornou os seguintes e-mails:
                 email = emails[0]
         else:
             email = emails[0]
+
+        # Salva no cache de contexto para mensagens futuras
+        self.context_cache[chat_id] = {
+            "id": email['id'],
+            "from": email['from'],
+            "subject": email['subject']
+        }
 
         content = f"De: {email['from']}\nAssunto: {email['subject']}\nCorpo:\n{email['body'][:4000]}"
 
@@ -349,13 +368,17 @@ Não inclua "Assunto:" ou "De:", escreva apenas o texto da mensagem que será en
             self._broadcast("⚠️ Minha memória está vazia ou não encontrei nada relevante. Peça para eu 'sincronizar a memória' primeiro.", chat_id)
             return
 
-        system_prompt = f"""Você é o 'Nexus', assistente executivo técnico.
-Responda à pergunta do usuário BASEANDO-SE EXCLUSIVAMENTE nos e-mails abaixo.
+        system_prompt = f"""Você é o 'Nexus', assistente executivo técnico com acesso ao histórico de e-mails.
+Responda à pergunta do usuário baseando-se nos e-mails recuperados da memória.
 
-CONTEXTO (Memória Vetorial):
+DIRETRIZES:
+1. Seja ultra-direto. Se a resposta for um valor ou data, coloque em negrito.
+2. Cite sempre que possível: "Conforme o e-mail de [Remetente] em [Data]..."
+3. Se houver informações conflitantes, aponte a mais recente.
+
+CONTEXTO RECUPERADO:
 {context}
-
-Se a resposta não estiver no contexto, diga claramente que não encontrou informações sobre isso nos e-mails salvos."""
+"""
 
         response = self.llm.analyze(system_prompt, question)
         self._broadcast(f"**🧠 NEXUS RECALL:**\n\n{response}", chat_id)
