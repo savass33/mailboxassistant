@@ -43,7 +43,7 @@ Você DEVE escolher UMA destas 'actions' permitidas:
 Regras CRÍTICAS:
 - Se o usuário perguntar "do que se trata X" ou "me dê mais detalhes sobre Y", a action é SEMPRE "deepdive".
 - "mark_read" deve ser FALSE por padrão. Mude para TRUE APENAS SE o usuário disser explicitamente as palavras "limpar", "marcar como lido" ou "apagar notificação".
-- Se a action for "deepdive", "delete" ou "reply", defina a "query" com o assunto ou remetente buscado (ex: "subject:portfólio"). Senão, "query" é "".
+- Se a action for "deepdive", "delete" ou "reply", defina a "query" usando operadores GMAIL se possível (ex: "from:filipe", "subject:portfólio", "from:gupy"). Se não houver remetente claro, use termos chave.
 - NUNCA invente actions.
 
 Entrada do usuário: "{user_text}"
@@ -80,7 +80,7 @@ Entrada do usuário: "{user_text}"
             elif action == "news":
                 self.process_newsletters(chat_id, mark_read)
             elif action == "deepdive":
-                self.deep_dive(query, chat_id, mark_read)
+                self.deep_dive(query, chat_id, mark_read, original_text=user_text)
             elif action == "reply":
                 self.reply_to_email(query, instruction, chat_id, mark_read)
             elif action == "schedule":
@@ -175,22 +175,45 @@ Você será penalizado se classificar um e-mail de admissão (Gupy) como NOISE o
         except Exception as e:
             self._broadcast(f"❌ Falha no processamento: {e}", chat_id)
 
-    def deep_dive(self, search_query: str, chat_id: int = None, mark_read: bool = False):
+    def deep_dive(self, search_query: str, chat_id: int = None, mark_read: bool = False, original_text: str = ""):
         print(f"{Fore.YELLOW}[*] Nexus Engine: Deep Dive em {search_query}...{Style.RESET_ALL}")
         self._broadcast(f"🕵️‍♂️ *Infiltrando e-mails: `{search_query}`...*", chat_id)
-        
-        # Remove a limitação de "não lido" para Deep Dive. O usuário pode querer reler um e-mail.
-        emails = self.gmail.fetch_emails(query=search_query, limit=1)
+
+        # Aumentamos o limite para permitir que o LLM escolha o melhor e-mail
+        emails = self.gmail.fetch_emails(query=search_query, limit=5)
         
         if not emails:
             self._broadcast(f"⚠️ Nenhum e-mail localizado para a busca `{search_query}`.", chat_id)
             return
-            
-        email = emails[0]
-        content = f"De: {email['from']}\nAssunto: {email['subject']}\nCorpo:\n{email['body'][:3000]}" 
+
+        # Se houver mais de um e-mail, pedimos ao LLM para selecionar o mais relevante
+        if len(emails) > 1 and original_text:
+            print(f"{Fore.YELLOW}[*] Nexus Engine: Selecionando e-mail mais relevante entre {len(emails)} resultados...{Style.RESET_ALL}")
+            selection_prompt = f"""O usuário pediu: "{original_text}"
+A busca retornou os seguintes e-mails:
+"""
+            for i, e in enumerate(emails):
+                selection_prompt += f"[{i}] De: {e['from']} | Assunto: {e['subject']} | Snippet: {e['snippet']}\n"
+
+            selection_prompt += "\nResponda APENAS com o número do índice (ex: 0, 1, 2) do e-mail que melhor corresponde ao pedido. Se nenhum for relevante, responda 'none'."
+
+            try:
+                choice_raw = self.llm.analyze("Responda apenas com o número ou 'none'.", selection_prompt).strip()
+                if choice_raw.isdigit() and int(choice_raw) < len(emails):
+                    email = emails[int(choice_raw)]
+                else:
+                    email = emails[0] # Fallback para o mais recente
+            except:
+                email = emails[0]
+        else:
+            email = emails[0]
+
+        content = f"De: {email['from']}\nAssunto: {email['subject']}\nCorpo:\n{email['body'][:4000]}"
 
         # Detecta automaticamente se o e-mail é uma Newsletter/Informativo
-        is_newsletter = "unsubscribe" in email['body'].lower() or "descadastrar" in email['body'].lower() or "newsletter" in email['from'].lower()
+        body_lower = email['body'].lower()
+        newsletter_keywords = ["unsubscribe", "descadastrar", "newsletter", "clique aqui", "view in browser", "mailing list", "preferências", "visualizar no navegador"]
+        is_newsletter = any(kw in body_lower for kw in newsletter_keywords) or "newsletter" in email['from'].lower() or "newsletter" in email['subject'].lower()
 
         if is_newsletter:
             system_prompt = """Você é o Nexus, um curador de conteúdo brilhante.
