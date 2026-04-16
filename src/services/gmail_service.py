@@ -141,18 +141,31 @@ class GmailService:
         return "Desconhecido"
 
     def _extract_body(self, payload: Dict) -> str:
-        """Processa MIME types para extrair o texto plano do corpo do e-mail de forma robusta."""
+        """Processa MIME types recursivamente para extrair texto do corpo do e-mail de forma robusta."""
+        import base64
+        import re
+        
+        def get_text_from_part(part):
+            if part.get('mimeType') == 'text/plain':
+                data = part.get('body', {}).get('data')
+                if data: return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+            elif part.get('mimeType') == 'text/html':
+                data = part.get('body', {}).get('data')
+                if data: 
+                    html_content = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+                    # Strip HTML tags
+                    text = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+                    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+                    text = re.sub(r'<[^>]+>', ' ', text)
+                    return " ".join(text.split())
+            if 'parts' in part:
+                for subpart in part['parts']:
+                    text = get_text_from_part(subpart)
+                    if text: return text
+            return ""
+
         try:
-            if 'parts' in payload:
-                for part in payload['parts']:
-                    if part['mimeType'] == 'text/plain':
-                        data = part['body'].get('data')
-                        if data:
-                            return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
-            elif payload.get('mimeType') == 'text/plain':
-                data = payload['body'].get('data')
-                if data:
-                    return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
-        except Exception:
-            pass # Silenciamos falhas de parse MIME para não quebrar a listagem principal
-        return ""
+            return get_text_from_part(payload)
+        except Exception as e:
+            print(f"{Fore.RED}❌ Erro ao extrair corpo do e-mail: {e}{Fore.RESET}")
+            return ""

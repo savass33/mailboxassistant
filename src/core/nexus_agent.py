@@ -31,19 +31,19 @@ class NexusAgent:
         router_prompt = f"""Você é um parser JSON. Sua única tarefa é analisar a entrada e cuspir UM JSON válido.
 Você DEVE escolher UMA destas 'actions' permitidas:
 "triage" = Resumir a caixa de entrada, ver não lidos de forma geral ou marcar lidos.
-"deepdive" = Ler um e-mail de um remetente ESPECÍFICO (ex: "do chefe", "da gupy").
+"deepdive" = Ler um e-mail de um remetente ESPECÍFICO ou perguntar sobre um assunto específico (ex: "do chefe", "sobre o portfólio", "do que se trata essa etapa").
 "news" = Ler apenas newsletters ou notícias.
 "reply" = Responder a um e-mail.
 "schedule" = Agendar um e-mail.
-"delete" = Apagar ou excluir um e-mail específico (ex: "apaga o e-mail do banco").
+"delete" = Apagar ou excluir um e-mail específico.
 "sync_memory" = Salvar e-mails na memória vetorial.
 "ask_memory" = Responder perguntas sobre histórico antigo.
-"chat" = Conversa genérica.
+"chat" = Conversa genérica, tirar dúvidas, ou falar com o assistente.
 
 Regras CRÍTICAS:
+- Se o usuário perguntar "do que se trata X" ou "me dê mais detalhes sobre Y", a action é SEMPRE "deepdive".
 - "mark_read" deve ser FALSE por padrão. Mude para TRUE APENAS SE o usuário disser explicitamente as palavras "limpar", "marcar como lido" ou "apagar notificação".
-- Se o usuário pedir para apagar/excluir o e-mail, a action é SEMPRE "delete".
-- Se a action for "deepdive" ou "delete", defina a "query" com o nome do remetente. Senão, "query" é "".
+- Se a action for "deepdive", "delete" ou "reply", defina a "query" com o assunto ou remetente buscado (ex: "subject:portfólio"). Senão, "query" é "".
 - NUNCA invente actions.
 
 Entrada do usuário: "{user_text}"
@@ -51,7 +51,7 @@ Entrada do usuário: "{user_text}"
         
         try:
             print(f"{Fore.YELLOW}[*] Nexus Engine: Roteando intenção via LLM...{Style.RESET_ALL}")
-            intent_response = self.llm.analyze("Responda APENAS com um objeto JSON válido, sem crases ou formatação markdown.", router_prompt)
+            intent_response = self.llm.analyze("Responda APENAS com um objeto JSON válido.", router_prompt)
             print(f"DEBUG LLM Router: {intent_response}")
             
             match = re.search(r'\{.*?\}', intent_response, re.DOTALL)
@@ -91,8 +91,12 @@ Entrada do usuário: "{user_text}"
                 self.sync_memory(chat_id)
             elif action == "ask_memory":
                 self.ask_memory(query, chat_id)
+            elif action == "chat":
+                # Processa perguntas genéricas usando o contexto histórico do LLM
+                response = self.llm.analyze("Você é o Nexus, assistente de e-mail. Responda de forma direta e técnica.", user_text)
+                self._broadcast(f"🤖 **NEXUS:**\n{response}", chat_id)
             else:
-                self._broadcast("🤖 **NEXUS:** Como posso otimizar sua caixa de entrada hoje?", chat_id)
+                self._broadcast("🤖 **NEXUS:** Comando não reconhecido.", chat_id)
                 
         except Exception as e:
             self._broadcast(f"❌ Erro no roteamento: {e}", chat_id)
@@ -108,23 +112,29 @@ Entrada do usuário: "{user_text}"
 
         email_text = "\n".join([f"ID: {e['id']} | De: {e['from']} | Assunto: {e['subject']} | Resumo: {e['snippet']}" for e in emails])
         
-        system_prompt = """Você é um classificador de dados estrito.
-Sua tarefa é ler os e-mails fornecidos e aplicar uma Tag e uma Categoria para cada um.
-É ESTUDANTEMENTE PROIBIDO criar, inventar ou deduzir e-mails que não estão na lista abaixo. Responda APENAS sobre os e-mails listados na seção 'EMAILS A PROCESSAR'.
+        system_prompt = """Você é um assistente executivo focado e infalível.
+Sua ÚNICA função é classificar os emails fornecidos e gerar uma lista formatada.
+Você NÃO PODE cometer erros. Você DEVE seguir a lógica exata abaixo:
 
-Regras de Classificação:
-🔴 CRÍTICO: Segurança, Chefia, Vagas de emprego, Estágios, Portfólios, Entrevistas, Prazos.
-🔵 FINANCEIRO: Bancos, Gastos, Pix, Compras.
-🟢 NOTÍCIAS: Newsletters, Artigos, Atualizações de software.
-⚪ NOISE: Promoções, Spam.
+🔴 | CRÍTICO | E-mails sobre: Emprego, Vagas, Gupy, Admissão, Documentos, Estágio, Portfólio, Segurança, Prazos urgentes.
+🔵 | FINANCEIRO | E-mails sobre: Bancos, Nubank, Inter, Pix, Gastos, Faturas.
+🟢 | NOTÍCIAS | E-mails sobre: Newsletters (Filipe Deschamps), Artigos, Resumos semanais.
+⚪ | NOISE | E-mails sobre: Pesquisa de satisfação (Bluefit, opiniões), Promoções (Steam, jogos), Spam, Lembretes genéricos.
 
-FORMATO OBRIGATÓRIO (Exatamente uma linha por e-mail da lista):
-TAG | CATEGORIA | Nome Real do Remetente - Assunto Original do Email.
+FORMATO OBRIGATÓRIO POR EMAIL (EXATAMENTE UMA LINHA COM PIPES):
+TAG | CATEGORIA | Nome do Remetente - Assunto. (Resumo em 1 frase).
 
-Não use negrito, não escreva introduções e NÃO INVENTE remetentes (ex: Nubank, Inter, Gupy) se eles não estiverem no texto original abaixo."""
+EXEMPLOS DE CLASSIFICAÇÃO PERFEITA (Siga este padrão para os emails reais):
+🔴 | CRÍTICO | Gupy - Você tem documentos pendentes para concluir a sua admissão. (Processo seletivo exige envio de documentos).
+🔴 | CRÍTICO | Aline - Etapa Portfólio Pessoal. (Confirmação de envio de portfólio para estágio).
+⚪ | NOISE | Bluefit - Queremos saber a sua opiniao! (Pesquisa de satisfação de academia).
+⚪ | NOISE | Steam - Squad from your Steam wishlist is now on sale! (Promoção de jogo).
+🟢 | NOTÍCIAS | Filipe Deschamps - Lei contra impressoras 3D. (Resumo de notícias diárias).
+
+Você será penalizado se classificar um e-mail de admissão (Gupy) como NOISE ou uma pesquisa de opinião (Bluefit) como CRÍTICO. Preste atenção aos remetentes e assuntos!"""
 
         try:
-            response = self.llm.analyze("Responda estritamente com as linhas no formato 'TAG | CATEGORIA | Texto'. Para cada email fornecido, crie uma linha.", system_prompt + "\n\nEMAILS REAIS A PROCESSAR:\n" + email_text)
+            response = self.llm.analyze("Gere APENAS as linhas no formato 'TAG | CATEGORIA | Texto'. Para cada email fornecido abaixo, crie UMA linha correspondente.", system_prompt + "\n\nEMAILS REAIS A PROCESSAR:\n" + email_text)
             print(f"DEBUG LLM Triage:\n{response}")
             
             lines = [l.strip() for l in response.strip().split('\n') if '|' in l and len(l.split('|')) >= 3]
@@ -142,7 +152,16 @@ Não use negrito, não escreva introduções e NÃO INVENTE remetentes (ex: Nuba
                 for line in chunk:
                     parts = line.split('|')
                     if len(parts) >= 3:
-                        tag, cat, content = parts[0].strip(), parts[1].strip(), "|".join(parts[2:]).strip()
+                        tag = parts[0].strip()
+                        # Se a IA esquecer o emoji, forçamos um padrão para não quebrar o layout
+                        if tag not in ["🔴", "🔵", "🟢", "⚪"]:
+                            if "CRÍTICO" in parts[1].upper(): tag = "🔴"
+                            elif "FINANCEIRO" in parts[1].upper(): tag = "🔵"
+                            elif "NOTÍCIAS" in parts[1].upper(): tag = "🟢"
+                            else: tag = "⚪"
+                            
+                        cat = parts[1].strip()
+                        content = "|".join(parts[2:]).strip()
                         bubble += f"{tag} <b>{cat}</b>\n{content}\n\n"
                 
                 if bubble:
